@@ -8,20 +8,38 @@
 
 ## Contents
 
+- [Introduction](#introduction)
 - [What problem does it solve?](#what-problem-does-it-solve)
 - [Demo at a glance](#demo-at-a-glance-what-the-evaluator-should-see)
+- [Dataset description](#dataset-description)
 - [System architecture](#system-architecture)
 - [Data flow pipeline (speed layer)](#data-flow-pipeline-speed-layer)
 - [Database flow pipeline](#database-flow-pipeline)
 - [Technologies connected together](#technologies-connected-together)
 - [Real-time event sequence](#real-time-event-sequence)
+- [System design (layers)](#system-design-layers)
+- [Methodology](#methodology)
 - [Evidence: screenshots](#evidence-screenshots)
+- [Results](#results)
 - [Evaluation](#evaluation-what-was-implemented-and-why-it-matters)
 - [Problems faced (and fixes)](#problems-faced-and-how-they-were-solved)
 - [How to run](#how-to-run-reproducible-demo-runbook)
 - [Key configuration](#key-configuration-knobs)
 - [Project structure](#project-structure)
 - [Limitations and future improvements](#limitations-and-future-improvements)
+- [AI use disclosure](#ai-use-disclosure)
+
+*Rubric alignment:* the narrative sections mirror [`report/REPORT_OUTLINE.md`](report/REPORT_OUTLINE.md) (Introduction → Dataset → System design → Methodology → Results → Challenges → AI disclosure). Diagrams, screenshots, evaluation notes, runbook, and limitations **remain** as the full demonstration package.
+
+---
+
+## Introduction
+
+This report describes a **course-scale Lambda Architecture** built on Chicago open data: a **batch layer** for trustworthy historical analytics and machine learning, a **speed layer** for near-real-time anomaly alerts, and a **serving + dashboard layer** that makes both paths visible in one place.
+
+**Motivation.** Crime data is a canonical big-data use case: high row counts, multiple related tables, messy fields, and a need for both **aggregate insight** (policy, planning) and **timely signals** (operational awareness). The design intentionally mirrors how production systems separate **offline recomputation** from **online stream processing**, then **merge** results at read time in the UI.
+
+**Lambda Architecture (one sentence).** **Spark** recomputes batch views and writes them to **PostgreSQL**; **Kafka** buffers live events consumed by **Storm**, which emits **alerts** into PostgreSQL (tabular) and **MongoDB** (documents); **Streamlit** reads both stores for demonstration.
 
 ---
 
@@ -39,6 +57,29 @@ This project demonstrates a **Lambda Architecture**: Spark materializes authorit
 - **Batch path**: Spark job completes and refreshes analytics tables used by charts (trends, arrest rates, hotspots).
 - **Speed path**: Python producer replaying the CSV into `crime_events` → Storm topology → alerts in Postgres + documents in Mongo.
 - **Presentation**: dashboard at `http://localhost:8501` reflecting batch aggregates and streaming alerts.
+
+---
+
+## Dataset description
+
+The batch job pulls **five Chicago-style datasets** (paths are globs in [`config/config.yaml`](config/config.yaml)):
+
+| Theme | Typical filename pattern (glob) | Role in analytics |
+|--------|--------------------------------|-------------------|
+| **Crimes (2001–Present)** | `Crimes*2001*Present*.csv` | Core fact table: timestamps, district, geo, crime type, arrest flag; drives trends, hotspots, Kafka replay |
+| **Arrests** | `Arrests*.csv` | Join on **case number** to compute arrest rates by primary type, district, race |
+| **Police stations** | `Police_Stations*.csv` | District metadata + coordinates for labeling; used when building **deterministic offender–district attribution** |
+| **Violence reduction / shootings** | `Violence_Reduction*.csv` | Gunshot injury flags + incident classifications; aggregated into **violence / gunshot** statistics and correlation inputs |
+| **Sex offenders / registry-style export** | `Sex_Offenders*.csv` | Block-level registry rows; aggregated to **offender-density-style** summaries (see Methodology for join limitations) |
+
+**Schema and cleaning choices (why they matter)**
+
+- Reads use **explicit `StructType` schemas** in [`spark/batch_job.py`](spark/batch_job.py) so malformed rows land in `_corrupt_record` rather than silently shifting columns.
+- CSV ingest uses **`PERMISSIVE`** mode for resilience; downstream steps **filter critical nulls** (e.g., `case_number` not null).
+- **`District`** is normalized with `trim`, regex extraction, and **`lpad` to three digits** so string variants join consistently across tables.
+- **Timestamps** are parsed from the Chicago **`MM/dd/yyyy hh:mm:ss a`** strings into real `timestamp` columns for grouping by **year / month / day-of-week / hour**.
+- **Types**: `Arrest` is cast to **boolean**; lat/lon to **double** for geo clustering.
+- **Streaming replay**: [`kafka/producer.py`](kafka/producer.py) **skips** rows missing **`latitude`** or **`longitude`** so the live map-centric path stays consistent.
 
 ---
 
@@ -175,6 +216,28 @@ sequenceDiagram
 
 ---
 
+## System design (layers)
+
+Aligned with standard Lambda decomposition:
+
+- **Batch layer (Apache Spark, [`spark/batch_job.py`](spark/batch_job.py))** — Ingests all CSV sources with typed schemas; cleans joins keys; aggregates **crime trends**, **arrest rates** (crime ⟕ arrests on case number); builds **violence / gunshot** rollups from the Violence Reduction extract; derives **sex-offender counts by district** (deterministic hashing; see Methodology); runs **PySpark ML `KMeans`** on `(latitude, longitude)` and writes centroid **hotspots**; materializes pairwise **correlation-style series** (`violence_rate` vs `arrest_rate`, offender counts vs crime counts) into PostgreSQL.
+- **Speed layer (`kafka/producer.py` + Storm topology)** — Producer replays crimes as JSON events into **`crime_events`**. Storm parses tuples, emits per-district sliding-window counts, compares to **`ANOMALY_THRESHOLD`**, and writes relational alerts plus Mongo documents (`alert_logs`).
+- **Serving layer (PostgreSQL + MongoDB)** — PostgreSQL stores **analytics tables** overwritten by Spark (`crime_trends`, `arrest_rates`, `violence_stats`, `offender_density`, `hotspots`, `correlations`, …) and **append-only streaming alerts**. MongoDB captures **flexible alert payloads** for the dashboard expander view. Schemas are bootstrapped from [`db/init.sql`](db/init.sql) and [`db/mongo-init.js`](db/mongo-init.js).
+- **Dashboard layer ([`dashboard/app.py`](dashboard/app.py))** — Streamlit reads PostgreSQL (`alerts`, `crime_trends`, `arrest_rates`, `hotspots`) and optionally Mongo (`alert_logs`); exposes Plotly charts, a geo map for centroids, and a raw-document panel.
+
+---
+
+## Methodology
+
+- **Explicit Spark schemas** — `CRIME_SCHEMA`, `ARRESTS_SCHEMA`, `POLICE_SCHEMA`, `VIOLENCE_SCHEMA`, and `SEX_SCHEMA` in [`spark/batch_job.py`](spark/batch_job.py) pin column order/type for every CSV variant you place under `/app/data` in Docker or `data/` locally.
+- **Null handling and casts** — `coalesce(..., "UNKNOWN")` for optional dimensions in arrest-rate groups; **left join** crime⟕arrests keeps all crimes; geo clustering uses only rows with **non-null** lat/lon; `dropDuplicates` on arrests by `case_number` avoids double-counting when joining.
+- **Sliding-window anomaly detection (Storm)** — Configurable window length, slide interval, and threshold (see [`docker/docker-compose.yml`](docker/docker-compose.yml) for the values used in the graded demo; [`config/config.yaml`](config/config.yaml) carries related defaults for documentation).
+- **K-Means geospatial hotspots** — `VectorAssembler` on `(latitude, longitude)`; **`KMeans`** with \(k =\) `spark.kmeans_k` (default **10** in config) and **seed 4109** for reproducibility; cluster sizes are joined back to centroid coordinates for the **hotspots** table and Streamlit map.
+- **Cross-dataset joins and correlations** — **Crime ⟕ Arrests** on `case_number` powers multi-dimensional arrest rates. **Violence** rollups include homicide vs shooting style breakdowns, top community areas, and **gunshot injury proportion by district**. A **correlations** table stores aligned \((x, y)\) pairs for **violence count vs district arrest rate** and **offender count vs district crime count** for secondary analysis (e.g., external plotting or future dashboard panels).
+- **Offender density vs true spatial join (limitation)** — Registered sex offender rows in this extract often **lack a police district key**. The implementation therefore assigns each row to a **synthetic district index** via `hash(block) mod N` and maps that index to the **ordered list of police districts**—a **deterministic** device for cross-district comparison, **not** a certified geospatial containment join. See [Results](#results) and [Limitations](#limitations-and-future-improvements).
+
+---
+
 ## Evidence: screenshots
 
 Artifacts under `Figs/` use descriptive names. Where filenames contain spaces, this README uses **angle-bracket paths** (`![](<path>)`), which GitHub-flavored Markdown resolves reliably.
@@ -214,6 +277,19 @@ Artifacts under `Figs/` use descriptive names. Where filenames contain spaces, t
 ### Streaming outputs (Mongo alert documents)
 
 ![Evidence — Speed layer: MongoDB alert documents from Storm.](<Figs/MongoDB alert documents.png>)
+
+---
+
+## Results
+
+This section maps rubric-style outcomes to the evidence above and the tables Spark materializes in PostgreSQL.
+
+- **Crime trends** — Year / month / hour aggregations in `crime_trends`; dashboard tabs and the **“Crime Trends by …”** figures in [Evidence: screenshots](#evidence-screenshots).
+- **Arrest rates** — Left-joined crime–arrest data produces `arrest_rates` (by primary type, district, race); **Top Arrest Rates** table and `TopArrestRates.png`.
+- **Violence and gunshot analysis** — `violence_stats` captures homicide vs shooting style metrics, community-area concentration, and **gunshot injury proportion by district** (see batch job). Suitable for extended charts beyond the default Streamlit panels.
+- **Offender density and deterministic district assignment** — `offender_density` aggregates registry rows per district using the **hash-mod assignment** described under Methodology; interpret as a **relative** cross-district signal, not ground-truth geocoding.
+- **Hotspot centroids** — `hotspots` from **K-Means** on lat/lon; map view in the dashboard and **Hotspot Centroids** figure.
+- **Alert examples** — PostgreSQL `alerts` table in the dashboard’s **Latest Alerts** grid; **MongoDB `alert_logs`** raw documents in the expander and in **MongoDB alert documents** screenshot.
 
 ---
 
@@ -260,6 +336,24 @@ Artifacts under `Figs/` use descriptive names. Where filenames contain spaces, t
 **Cause**: Older topology instance still attached to the **same consumer group**; with a single partition, only one consumer receives messages.
 
 **Fix**: Kill superseded topologies (`storm kill <name>`) before relying on a new submission, or use distinct consumer identities per graded run.
+
+### Large local CSV files
+
+**Challenge**: The crimes extract is a **multi-million-row** file; repeated full scans during iteration are slow on a laptop and stress Docker disk I/O.
+
+**Mitigation**: Spark’s column pruning and overwrite-once batch job keep recomputation explicit; optional limits in `config/config.yaml` (`crime_sample_limit`, `other_sample_limit`, `sample_mode`) support faster dev cycles when needed.
+
+### Dirty schema names and weak join keys
+
+**Challenge**: Chicago exports use **human-readable headers** (spaces, mixed case) and joins such as **crime ↔ arrest** depend on **case number** alignment; violence and sex-offender extracts use **different key conventions** than the core crime file.
+
+**Mitigation**: Centralized **rename + cast** steps, `dropDuplicates` on arrests, and **documented** limitations (e.g., offender-to-district hashing) instead of silent wrong joins.
+
+### Container orchestration
+
+**Challenge**: Coordinating **ZooKeeper, Kafka, Storm, Spark, two databases, and Streamlit** with correct **ports, dependencies, and env** is error-prone on Windows/WSL2.
+
+**Mitigation**: A single [`docker/docker-compose.yml`](docker/docker-compose.yml) encodes service order, env for Storm, and published ports; the runbook below matches what graders can execute end-to-end.
 
 ---
 
@@ -347,3 +441,9 @@ Figs/            # Report screenshots and terminal evidence
 - **Scale-out**: increase topic partitions and Storm workers for higher throughput tests.
 - **Richer anomalies**: baseline per district/time-of-week instead of one global threshold; optional seasonal adjustment.
 - **Geospatial refinement**: grid-based hotspots (e.g. H3) and reproducible CRS handling for centroid maps.
+
+---
+
+## AI use disclosure
+
+**Generative AI assistance** (e.g. ChatGPT, Cursor) was used to **scaffold, debug, and document** parts of this project—including README structure, Docker/Spark troubleshooting notes, and code review-style refactors. All claims in this report were **checked against the repository** (`spark/batch_job.py`, Storm sources, Compose, dashboard). If your course requires **prompt screenshots**, attach them as an appendix in the LMS or add them under `Figs/` and link them here.
