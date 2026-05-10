@@ -14,51 +14,7 @@ This report describes a **course-scale Lambda Architecture** built on Chicago op
 
 **Lambda Architecture (one sentence).** **Spark** recomputes batch views and writes them to **PostgreSQL**; **Kafka** buffers live events consumed by **Storm**, which emits **alerts** into PostgreSQL (tabular) and **MongoDB** (documents); **Streamlit** reads both stores for demonstration.
 
----
-
-<h3 align="center">What problem does it solve?</h3>
-
-City-scale crime data is **large**, **continuously updated**, and used for both **strategic** (long-horizon trends, hotspots) and **tactical** (unusual bursts of incidents) questions.
-
-This project demonstrates a **Lambda Architecture**: Spark materializes authoritative **batch views** into PostgreSQL while Storm consumes Kafka for **low-latency** district-level windows and writes **alerts** to PostgreSQL (structured) and MongoDB (document audit trail). The dashboard reads both paths so evaluators see one cohesive system rather than disconnected demos.
-
----
-
-<h3 align="center">Demo at a glance (what the evaluator should see)</h3>
-
-- **Docker Compose stack running**: ZooKeeper, Kafka, Storm (nimbus, supervisor, UI), Spark (master, worker), PostgreSQL, MongoDB, Streamlit dashboard.
-- **Batch path**: Spark job completes and refreshes analytics tables used by charts (trends, arrest rates, hotspots).
-- **Speed path**: Python producer replaying the CSV into `crime_events` → Storm topology → alerts in Postgres + documents in Mongo.
-- **Presentation**: dashboard at `http://localhost:8501` reflecting batch aggregates and streaming alerts.
-
----
-
-<h2 align="center">Dataset description</h2>
-
-The batch job pulls **five Chicago-style datasets** (paths are globs in [`config/config.yaml`](config/config.yaml)):
-
-| Theme | Typical filename pattern (glob) | Role in analytics |
-|--------|--------------------------------|-------------------|
-| **Crimes (2001–Present)** | `Crimes*2001*Present*.csv` | Core fact table: timestamps, district, geo, crime type, arrest flag; drives trends, hotspots, Kafka replay |
-| **Arrests** | `Arrests*.csv` | Join on **case number** to compute arrest rates by primary type, district, race |
-| **Police stations** | `Police_Stations*.csv` | District metadata + coordinates for labeling; used when building **deterministic offender–district attribution** |
-| **Violence reduction / shootings** | `Violence_Reduction*.csv` | Gunshot injury flags + incident classifications; aggregated into **violence / gunshot** statistics and correlation inputs |
-| **Sex offenders / registry-style export** | `Sex_Offenders*.csv` | Block-level registry rows; aggregated to **offender-density-style** summaries (see Methodology for join limitations) |
-
-**Schema and cleaning choices (why they matter)**
-
-- Reads use **explicit `StructType` schemas** in [`spark/batch_job.py`](spark/batch_job.py) so malformed rows land in `_corrupt_record` rather than silently shifting columns.
-- CSV ingest uses **`PERMISSIVE`** mode for resilience; downstream steps **filter critical nulls** (e.g., `case_number` not null).
-- **`District`** is normalized with `trim`, regex extraction, and **`lpad` to three digits** so string variants join consistently across tables.
-- **Timestamps** are parsed from the Chicago **`MM/dd/yyyy hh:mm:ss a`** strings into real `timestamp` columns for grouping by **year / month / day-of-week / hour**.
-- **Types**: `Arrest` is cast to **boolean**; lat/lon to **double** for geo clustering.
-- **Streaming replay**: [`kafka/producer.py`](kafka/producer.py) **skips** rows missing **`latitude`** or **`longitude`** so the live map-centric path stays consistent.
-
----
-
-<h2 align="center">System design</h2>
-
-The system follows the Lambda Architecture pattern, combining batch processing for historical analysis and stream processing for low-latency alerts.
+**System at a glance (Lambda).** The high-level architecture below is the “map” for the rest of the report.
 
 ```mermaid
 graph TD
@@ -95,6 +51,43 @@ graph TD
     Postgres -->|Query| UI
     Mongo -->|Query| UI
 ```
+
+---
+
+<h3 align="center">What problem does it solve?</h3>
+
+City-scale crime data is **large**, **continuously updated**, and used for both **strategic** (long-horizon trends, hotspots) and **tactical** (unusual bursts of incidents) questions.
+
+This project demonstrates a **Lambda Architecture**: Spark materializes authoritative **batch views** into PostgreSQL while Storm consumes Kafka for **low-latency** district-level windows and writes **alerts** to PostgreSQL (structured) and MongoDB (document audit trail). The dashboard reads both paths so evaluators see one cohesive system rather than disconnected demos.
+
+---
+
+<h2 align="center">Dataset description</h2>
+
+The batch job pulls **five Chicago-style datasets** (paths are globs in [`config/config.yaml`](config/config.yaml)):
+
+| Theme | Typical filename pattern (glob) | Role in analytics |
+|--------|--------------------------------|-------------------|
+| **Crimes (2001–Present)** | `Crimes*2001*Present*.csv` | Core fact table: timestamps, district, geo, crime type, arrest flag; drives trends, hotspots, Kafka replay |
+| **Arrests** | `Arrests*.csv` | Join on **case number** to compute arrest rates by primary type, district, race |
+| **Police stations** | `Police_Stations*.csv` | District metadata + coordinates for labeling; used when building **deterministic offender–district attribution** |
+| **Violence reduction / shootings** | `Violence_Reduction*.csv` | Gunshot injury flags + incident classifications; aggregated into **violence / gunshot** statistics and correlation inputs |
+| **Sex offenders / registry-style export** | `Sex_Offenders*.csv` | Block-level registry rows; aggregated to **offender-density-style** summaries (see Methodology for join limitations) |
+
+**Schema and cleaning choices (why they matter)**
+
+- Reads use **explicit `StructType` schemas** in [`spark/batch_job.py`](spark/batch_job.py) so malformed rows land in `_corrupt_record` rather than silently shifting columns.
+- CSV ingest uses **`PERMISSIVE`** mode for resilience; downstream steps **filter critical nulls** (e.g., `case_number` not null).
+- **`District`** is normalized with `trim`, regex extraction, and **`lpad` to three digits** so string variants join consistently across tables.
+- **Timestamps** are parsed from the Chicago **`MM/dd/yyyy hh:mm:ss a`** strings into real `timestamp` columns for grouping by **year / month / day-of-week / hour**.
+- **Types**: `Arrest` is cast to **boolean**; lat/lon to **double** for geo clustering.
+- **Streaming replay**: [`kafka/producer.py`](kafka/producer.py) **skips** rows missing **`latitude`** or **`longitude`** so the live map-centric path stays consistent.
+
+**Streaming source note.** For the speed layer, the **Crimes** CSV is replayed by the producer into Kafka topic **`crime_events`** (one event per row) and then consumed by the Storm topology.
+
+---
+
+<h2 align="center">System design</h2>
 
 ---
 
@@ -417,4 +410,4 @@ Figs/            # Report screenshots and terminal evidence
 
 <h2 align="center">AI use disclosure</h2>
 
-**Generative AI assistance** (e.g. ChatGPT, Cursor) was used to **scaffold, debug, and document** parts of this project—including README structure, Docker/Spark troubleshooting notes, and code review-style refactors. All claims in this report were **checked against the repository** (`spark/batch_job.py`, Storm sources, Compose, dashboard). If your course requires **prompt screenshots**, attach them as an appendix in the LMS or add them under `Figs/` and link them here.
+**Generative AI assistance** (e.g. Codex, Antigravity, Cursor) was used to **scaffold, debug, and document** parts of this project—including README structure, Docker/Spark troubleshooting notes, and code review-style refactors.
