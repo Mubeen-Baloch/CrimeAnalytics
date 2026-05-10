@@ -1,0 +1,40 @@
+data:
+  crime_glob: "/app/data/Crimes*2001*Present*.csv"
+  arrests_glob: "/app/data/Arrests*.csv"
+  police_stations_glob: "/app/data/Police_Stations*.csv"
+  violence_glob: "/app/data/Violence_Reduction*.csv"
+  sex_offenders_glob: "/app/data/Sex_Offenders*.csv"
+  sample_mode: false
+  crime_sample_limit: 0
+  other_sample_limit: 0
+
+kafka:
+  bootstrap_servers: "kafka:9092"
+  topic: "crime_events"
+  producer_rate_per_second: 1.0
+  producer_max_rows: 0
+
+storm:
+  topology_name: "crime-analytics"
+  window_size_seconds: 300
+  slide_interval_seconds: 60
+  anomaly_threshold: 50
+
+postgres:
+  host: "postgres"
+  port: 5432
+  database: "crime_analytics"
+  user: "crime_user"
+  password: "crime_pass"
+  jdbc_url: "jdbc:postgresql://postgres:5432/crime_analytics"
+
+mongodb:
+  uri: "mongodb://mongo:27017"
+  database: "crime_analytics"
+  raw_events_collection: "raw_events"
+  alerts_collection: "alert_logs"
+
+spark:
+  app_name: "CrimeAnalyticsBatch"
+  kmeans_k: 10
+  jdbc_driver: "org.postgresql.Driver"

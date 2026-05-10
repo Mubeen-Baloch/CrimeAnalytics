@@ -1,0 +1,150 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: crime_analytics
+      POSTGRES_USER: crime_user
+      POSTGRES_PASSWORD: crime_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../db/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27018:27017"
+    volumes:
+      - ../db/mongo-init.js:/docker-entrypoint-initdb.d/001-mongo-init.js:ro
+      - mongo_data:/data/db
+
+  spark-master:
+    build:
+      context: ..
+      dockerfile: docker/spark.Dockerfile
+    image: crimeanalytics-spark:3.5.0
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host 0.0.0.0
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - ..:/app
+
+  spark-worker:
+    build:
+      context: ..
+      dockerfile: docker/spark.Dockerfile
+    image: crimeanalytics-spark:3.5.0
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_MEMORY: 3G
+      SPARK_WORKER_CORES: 2
+    volumes:
+      - ..:/app
+
+  storm-nimbus:
+    image: storm:2.6.2
+    command: storm nimbus
+    depends_on:
+      - zookeeper
+      - kafka
+      - postgres
+      - mongo
+    environment:
+      STORM_ZOOKEEPER_SERVERS: '["zookeeper"]'
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: crime_events
+      POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/crime_analytics
+      POSTGRES_USER: crime_user
+      POSTGRES_PASSWORD: crime_pass
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DATABASE: crime_analytics
+      WINDOW_SIZE_SECONDS: ${WINDOW_SIZE_SECONDS:-300}
+      SLIDE_INTERVAL_SECONDS: ${SLIDE_INTERVAL_SECONDS:-60}
+      ANOMALY_THRESHOLD: ${ANOMALY_THRESHOLD:-50}
+    ports:
+      - "6627:6627"
+    volumes:
+      - ../storm:/storm-app
+      - ./storm.yaml:/conf/storm.yaml
+
+  storm-supervisor:
+    image: storm:2.6.2
+    command: storm supervisor
+    depends_on:
+      - storm-nimbus
+    environment:
+      STORM_ZOOKEEPER_SERVERS: '["zookeeper"]'
+      NIMBUS_SEEDS: '["storm-nimbus"]'
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: crime_events
+      POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/crime_analytics
+      POSTGRES_USER: crime_user
+      POSTGRES_PASSWORD: crime_pass
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DATABASE: crime_analytics
+      WINDOW_SIZE_SECONDS: ${WINDOW_SIZE_SECONDS:-300}
+      SLIDE_INTERVAL_SECONDS: ${SLIDE_INTERVAL_SECONDS:-60}
+      ANOMALY_THRESHOLD: ${ANOMALY_THRESHOLD:-50}
+    volumes:
+      - ../storm:/storm-app
+      - ./storm.yaml:/conf/storm.yaml
+
+  storm-ui:
+    image: storm:2.6.2
+    command: storm ui
+    depends_on:
+      - storm-nimbus
+    environment:
+      STORM_ZOOKEEPER_SERVERS: '["zookeeper"]'
+      NIMBUS_SEEDS: '["storm-nimbus"]'
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+
+  dashboard:
+    image: python:3.12-slim
+    depends_on:
+      - postgres
+      - mongo
+    working_dir: /app
+    command: sh -c "pip install -r requirements.txt && streamlit run dashboard/app.py --server.address=0.0.0.0 --server.port=8501"
+    ports:
+      - "8501:8501"
+    volumes:
+      - ..:/app
+    environment:
+      CONFIG_PATH: /app/config/config.yaml
+
+volumes:
+  postgres_data:
+  mongo_data:
