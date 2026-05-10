@@ -1,4 +1,4 @@
-# Real-Time Crime Analytics (Lambda Architecture)
+<h1 align="center">Real-Time Crime Analytics (Lambda Architecture)</h1>
 
 **Course**: CS4109 Fundamentals of Big Data Analytics
 
@@ -6,34 +6,7 @@
 
 ---
 
-## Contents
-
-- [Introduction](#introduction)
-- [What problem does it solve?](#what-problem-does-it-solve)
-- [Demo at a glance](#demo-at-a-glance-what-the-evaluator-should-see)
-- [Dataset description](#dataset-description)
-- [System architecture](#system-architecture)
-- [Data flow pipeline (speed layer)](#data-flow-pipeline-speed-layer)
-- [Database flow pipeline](#database-flow-pipeline)
-- [Technologies connected together](#technologies-connected-together)
-- [Real-time event sequence](#real-time-event-sequence)
-- [System design (layers)](#system-design-layers)
-- [Methodology](#methodology)
-- [Evidence: screenshots](#evidence-screenshots)
-- [Results](#results)
-- [Evaluation](#evaluation-what-was-implemented-and-why-it-matters)
-- [Problems faced (and fixes)](#problems-faced-and-how-they-were-solved)
-- [How to run](#how-to-run-reproducible-demo-runbook)
-- [Key configuration](#key-configuration-knobs)
-- [Project structure](#project-structure)
-- [Limitations and future improvements](#limitations-and-future-improvements)
-- [AI use disclosure](#ai-use-disclosure)
-
-*Rubric alignment:* the narrative sections mirror [`report/REPORT_OUTLINE.md`](report/REPORT_OUTLINE.md) (Introduction → Dataset → System design → Methodology → Results → Challenges → AI disclosure). Diagrams, screenshots, evaluation notes, runbook, and limitations **remain** as the full demonstration package.
-
----
-
-## Introduction
+<h2 align="center">Introduction</h2>
 
 This report describes a **course-scale Lambda Architecture** built on Chicago open data: a **batch layer** for trustworthy historical analytics and machine learning, a **speed layer** for near-real-time anomaly alerts, and a **serving + dashboard layer** that makes both paths visible in one place.
 
@@ -43,7 +16,7 @@ This report describes a **course-scale Lambda Architecture** built on Chicago op
 
 ---
 
-## What problem does it solve?
+<h3 align="center">What problem does it solve?</h3>
 
 City-scale crime data is **large**, **continuously updated**, and used for both **strategic** (long-horizon trends, hotspots) and **tactical** (unusual bursts of incidents) questions.
 
@@ -51,7 +24,7 @@ This project demonstrates a **Lambda Architecture**: Spark materializes authorit
 
 ---
 
-## Demo at a glance (what the evaluator should see)
+<h3 align="center">Demo at a glance (what the evaluator should see)</h3>
 
 - **Docker Compose stack running**: ZooKeeper, Kafka, Storm (nimbus, supervisor, UI), Spark (master, worker), PostgreSQL, MongoDB, Streamlit dashboard.
 - **Batch path**: Spark job completes and refreshes analytics tables used by charts (trends, arrest rates, hotspots).
@@ -60,7 +33,7 @@ This project demonstrates a **Lambda Architecture**: Spark materializes authorit
 
 ---
 
-## Dataset description
+<h2 align="center">Dataset description</h2>
 
 The batch job pulls **five Chicago-style datasets** (paths are globs in [`config/config.yaml`](config/config.yaml)):
 
@@ -83,7 +56,7 @@ The batch job pulls **five Chicago-style datasets** (paths are globs in [`config
 
 ---
 
-## System architecture
+<h2 align="center">System design</h2>
 
 The system follows the Lambda Architecture pattern, combining batch processing for historical analysis and stream processing for low-latency alerts.
 
@@ -125,7 +98,7 @@ graph TD
 
 ---
 
-## Data flow pipeline (speed layer)
+<h3 align="center">Speed-layer data flow (Storm topology)</h3>
 
 The speed layer parses each event, aggregates by district over a sliding window, tests an anomaly threshold, then persists alerts.
 
@@ -146,7 +119,7 @@ graph LR
 
 ---
 
-## Database flow pipeline
+<h3 align="center">Serving-layer data flow (PostgreSQL + MongoDB)</h3>
 
 PostgreSQL holds analytics and relational alert rows suited to SQL queries; MongoDB holds raw-style alert documents for flexible inspection.
 
@@ -174,7 +147,7 @@ graph TD
 
 ---
 
-## Technologies connected together
+<h3 align="center">Technologies connected together</h3>
 
 ```mermaid
 graph TD
@@ -191,7 +164,7 @@ Kafka in Docker uses **Confluent** images (`cp-kafka:7.6.1`); broker API version
 
 ---
 
-## Real-time event sequence
+<h3 align="center">Real-time event sequence</h3>
 
 ```mermaid
 sequenceDiagram
@@ -216,18 +189,16 @@ sequenceDiagram
 
 ---
 
-## System design (layers)
+Aligned with the Lambda architecture decomposition:
 
-Aligned with standard Lambda decomposition:
-
-- **Batch layer (Apache Spark, [`spark/batch_job.py`](spark/batch_job.py))** — Ingests all CSV sources with typed schemas; cleans joins keys; aggregates **crime trends**, **arrest rates** (crime ⟕ arrests on case number); builds **violence / gunshot** rollups from the Violence Reduction extract; derives **sex-offender counts by district** (deterministic hashing; see Methodology); runs **PySpark ML `KMeans`** on `(latitude, longitude)` and writes centroid **hotspots**; materializes pairwise **correlation-style series** (`violence_rate` vs `arrest_rate`, offender counts vs crime counts) into PostgreSQL.
-- **Speed layer (`kafka/producer.py` + Storm topology)** — Producer replays crimes as JSON events into **`crime_events`**. Storm parses tuples, emits per-district sliding-window counts, compares to **`ANOMALY_THRESHOLD`**, and writes relational alerts plus Mongo documents (`alert_logs`).
-- **Serving layer (PostgreSQL + MongoDB)** — PostgreSQL stores **analytics tables** overwritten by Spark (`crime_trends`, `arrest_rates`, `violence_stats`, `offender_density`, `hotspots`, `correlations`, …) and **append-only streaming alerts**. MongoDB captures **flexible alert payloads** for the dashboard expander view. Schemas are bootstrapped from [`db/init.sql`](db/init.sql) and [`db/mongo-init.js`](db/mongo-init.js).
-- **Dashboard layer ([`dashboard/app.py`](dashboard/app.py))** — Streamlit reads PostgreSQL (`alerts`, `crime_trends`, `arrest_rates`, `hotspots`) and optionally Mongo (`alert_logs`); exposes Plotly charts, a geo map for centroids, and a raw-document panel.
+- **Batch layer (Apache Spark, [`spark/batch_job.py`](spark/batch_job.py))** — typed ingest + cleaning, historical analytics tables, geospatial K-Means hotspots, and correlation-style outputs into PostgreSQL.
+- **Speed layer (`kafka/producer.py` + Storm topology)** — Kafka replay + sliding-window anomaly detection into PostgreSQL and MongoDB.
+- **Serving layer (PostgreSQL + MongoDB)** — SQL-friendly analytics and alerts + flexible alert documents.
+- **Dashboard layer ([`dashboard/app.py`](dashboard/app.py))** — Streamlit reads both stores for a single integrated demonstration.
 
 ---
 
-## Methodology
+<h2 align="center">Methodology</h2>
 
 - **Explicit Spark schemas** — `CRIME_SCHEMA`, `ARRESTS_SCHEMA`, `POLICE_SCHEMA`, `VIOLENCE_SCHEMA`, and `SEX_SCHEMA` in [`spark/batch_job.py`](spark/batch_job.py) pin column order/type for every CSV variant you place under `/app/data` in Docker or `data/` locally.
 - **Null handling and casts** — `coalesce(..., "UNKNOWN")` for optional dimensions in arrest-rate groups; **left join** crime⟕arrests keeps all crimes; geo clustering uses only rows with **non-null** lat/lon; `dropDuplicates` on arrests by `case_number` avoids double-counting when joining.
@@ -238,29 +209,31 @@ Aligned with standard Lambda decomposition:
 
 ---
 
-## Evidence: screenshots
+<h2 align="center">Results</h2>
 
-Artifacts under `Figs/` use descriptive names. Where filenames contain spaces, this README uses **angle-bracket paths** (`![](<path>)`), which GitHub-flavored Markdown resolves reliably.
+This section presents the core outcomes (trends, hotspots, arrest rates, alerts) together with screenshots that validate the end-to-end system.
 
-### Full dashboard (single-screen demonstration)
+<h3 align="center">Evidence (screenshots)</h3>
+
+#### Full dashboard (single-screen demonstration)
 
 ![Evidence — Streamlit dashboard full page: alerts, batch charts, and hotspot views.](Figs/StreamlitDashboardFullPage.png)
 
-### Storm UI (topology health and tuple flow)
+#### Storm UI (topology health and tuple flow)
 
 ![Evidence — Storm UI full page: crime analytics topology status and metrics.](Figs/StormUICrimeAnalyticsFullPage.png)
 
 ![Evidence — Storm UI topology visualization: spouts, bolts, tuple flow.](Figs/StormUICrimeAnalyticsTopologyVisualization.png)
 
-### Spark UI (batch application execution)
+#### Spark UI (batch application execution)
 
 ![Evidence — Spark application UI: CrimeAnalyticsBatch job execution and stages.](Figs/SparkApplicationUIFullPage.png)
 
-### Infrastructure proof (Docker containers)
+#### Infrastructure proof (Docker containers)
 
 ![Evidence — Docker: stack containers running (Kafka, ZooKeeper, Storm, Spark, Postgres, Mongo, dashboard).](Figs/DockerRunningContainers.png)
 
-### Batch outputs (analytics visuals)
+#### Batch outputs (analytics visuals)
 
 ![Evidence — Batch layer: latest analytics summary charts (Spark → Postgres → dashboard).](Figs/LatestAnalytics.png)
 
@@ -274,15 +247,13 @@ Artifacts under `Figs/` use descriptive names. Where filenames contain spaces, t
 
 ![Evidence — Batch analytics: geographic hotspot centroids.](<Figs/Hotspot Centroids.png>)
 
-### Streaming outputs (Mongo alert documents)
+#### Streaming outputs (Mongo alert documents)
 
 ![Evidence — Speed layer: MongoDB alert documents from Storm.](<Figs/MongoDB alert documents.png>)
 
 ---
 
-## Results
-
-This section maps rubric-style outcomes to the evidence above and the tables Spark materializes in PostgreSQL.
+This section maps outcomes to the evidence above and the tables Spark materializes in PostgreSQL.
 
 - **Crime trends** — Year / month / hour aggregations in `crime_trends`; dashboard tabs and the **“Crime Trends by …”** figures in [Evidence: screenshots](#evidence-screenshots).
 - **Arrest rates** — Left-joined crime–arrest data produces `arrest_rates` (by primary type, district, race); **Top Arrest Rates** table and `TopArrestRates.png`.
@@ -311,7 +282,7 @@ This section maps rubric-style outcomes to the evidence above and the tables Spa
 
 ---
 
-## Problems faced (and how they were solved)
+<h2 align="center">Challenges</h2>
 
 ### Spark `--packages` / Ivy cache in the container
 
@@ -357,7 +328,7 @@ This section maps rubric-style outcomes to the evidence above and the tables Spa
 
 ---
 
-## How to run (reproducible demo runbook)
+<h2 align="center">How to run (reproducible demo runbook)</h2>
 
 ### Prerequisites
 
@@ -411,7 +382,7 @@ python kafka/producer.py --config config/config.yaml
 
 ---
 
-## Key configuration knobs
+<h2 align="center">Key configuration knobs</h2>
 
 | Where | What |
 |--------|------|
@@ -420,7 +391,7 @@ python kafka/producer.py --config config/config.yaml
 
 ---
 
-## Project structure
+<h2 align="center">Project structure</h2>
 
 ```
 config/          # runtime YAML (connections, topic, etc.)
@@ -435,7 +406,7 @@ Figs/            # Report screenshots and terminal evidence
 
 ---
 
-## Limitations and future improvements
+<h2 align="center">Limitations and future improvements</h2>
 
 - **Operational metrics**: surface Kafka lag, Storm bolt latency, and end-to-end alert delay for quantitative streaming evaluation.
 - **Scale-out**: increase topic partitions and Storm workers for higher throughput tests.
@@ -444,6 +415,6 @@ Figs/            # Report screenshots and terminal evidence
 
 ---
 
-## AI use disclosure
+<h2 align="center">AI use disclosure</h2>
 
 **Generative AI assistance** (e.g. ChatGPT, Cursor) was used to **scaffold, debug, and document** parts of this project—including README structure, Docker/Spark troubleshooting notes, and code review-style refactors. All claims in this report were **checked against the repository** (`spark/batch_job.py`, Storm sources, Compose, dashboard). If your course requires **prompt screenshots**, attach them as an appendix in the LMS or add them under `Figs/` and link them here.
